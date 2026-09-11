@@ -1,0 +1,28 @@
+# Environment variables & secrets
+.env
+*.env
+.env.*
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+ENV/
+
+# Output directories & logs
+generated_images/
+logs/
+*.log
+
+# OS & IDE files
+.DS_Store
+.vscode/
+.idea/
+
