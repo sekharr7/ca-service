@@ -127,7 +127,7 @@ async def process_article_service(
         theme_subtopic=theme_subtopic,
         ca_created_date=parsed_date,
         created_at=created_at,
-        source=article_url,
+        source=processed_url,
         view_count=random.randint(7, 56),
     )
     db.add(ca_entry)

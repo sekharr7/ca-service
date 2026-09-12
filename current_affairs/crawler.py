@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode, urlparse
 from bs4 import BeautifulSoup
 import httpx
 
@@ -9,8 +9,28 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 
 def preprocess_url(url: str) -> str:
-    """Standardize URL by stripping trailing slashes."""
-    return url.strip().rstrip('/')
+    """
+    Standardize URL:
+    - Strip trailing slashes.
+    - Remove tracking and referral query parameters (?ref=..., &term=..., utm_*, fbclid, etc.).
+    """
+    if not url:
+        return ""
+    url = url.strip()
+    parts = urlsplit(url)
+
+    tracking_params = {
+        "ref", "term", "fbclid", "gclid", "msclkid", "twclid", "yclid",
+        "spjobid", "spmailingid", "spuserid", "cmpid", "source", "campaign"
+    }
+
+    filtered_query = [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not (k.lower() in tracking_params or k.lower().startswith("utm_") or k.lower().startswith("ref_"))
+    ]
+    new_query = urlencode(filtered_query)
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, path, new_query, ""))
 
 
 def is_pib_url(url: str) -> bool:
