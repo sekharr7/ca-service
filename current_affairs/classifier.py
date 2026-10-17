@@ -9,6 +9,8 @@ from current_affairs.config import (
     AZURE_OPENAI_API_VERSION,
     MODEL_GENERATOR,
     PPLEX_API_KEY,
+    PPLEX_BASE_URL,
+    PRIMARY_SYNTHESIS_MODEL,
     TAXONOMY_TIMEOUT,
     DEFAULT_MAX_RETRIES,
 )
@@ -25,7 +27,7 @@ def classify_topic_subtopic(
     """
     Classify missing topic/subtopic by querying mtr_subjects, mtr_topics, and mtr_subtopics.
     Uses synthesized article notes (title, subtitle, keywords) for high accuracy and minimal token usage.
-    Powered primarily by gpt-5.6-luna on Azure OpenAI with fallback to sonar-pro.
+    Powered primarily by gpt-6-luna on Azure OpenAI with fallback to sonar-pro.
     """
     try:
         theme_lower = (theme or "").lower()
@@ -151,15 +153,15 @@ Return ONLY a JSON object in this exact format:
             )
             raw = resp.choices[0].message.content.strip()
         except Exception as luna_err:
-            print(f"[TAXONOMY] {MODEL_GENERATOR} attempt failed ({luna_err}), falling back to sonar-pro...", flush=True)
+            print(f"[TAXONOMY] {MODEL_GENERATOR} attempt failed ({luna_err}), falling back to {PRIMARY_SYNTHESIS_MODEL}...", flush=True)
             pplex_client = OpenAI(
                 api_key=PPLEX_API_KEY,
-                base_url="https://api.perplexity.ai",
+                base_url=PPLEX_BASE_URL,
                 timeout=TAXONOMY_TIMEOUT,
                 max_retries=DEFAULT_MAX_RETRIES,
             )
             resp = pplex_client.chat.completions.create(
-                model="sonar-pro",
+                model=PRIMARY_SYNTHESIS_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
             )

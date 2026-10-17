@@ -1,132 +1,214 @@
 # UPSC Current Affairs Ingestion & Synthesis Pipeline
 
-An automated, local pipeline designed to ingest news articles from Excel spreadsheets, crawl content bypassing bot-detection blocks, synthesize high-yield UPSC Civil Services examination coaching notes, automatically classify topics against syllabus taxonomies, generate high-resolution editorial infographics, and store records across database tiers.
+An enterprise-grade, local pipeline designed to ingest news articles from Excel spreadsheets, crawl content bypassing bot-detection blocks and paywalls, sanitize content universally, synthesize high-yield UPSC Civil Services examination coaching notes, automatically classify topics against syllabus taxonomies, generate high-resolution editorial infographics asynchronously, and store validated records across database tiers (`mntor_dev` ➔ `pilot_db` / `prod`).
 
 ---
 
-## 1. System Architecture
+## 1. System Architecture Overview
 
-The pipeline is organized as a modular, decoupled Python package:
+The system is designed as a modular, decoupled Python architecture optimized for high-throughput batch processing, zero idle wait time, universal content sanitization, and strict data quality gates.
 
 ```
 yooki/
 ├── current_affairs/                   # Core modular package
 │   ├── __init__.py                    # Public API exports
-│   ├── config.py                      # Environment variables, timeouts, project paths
+│   ├── config.py                      # Environment variables, model endpoints, project paths
 │   ├── database.py                    # SQLAlchemy Models & Session Factory
-│   ├── crawler.py                     # Crawl4AI local Chromium engine & site-specific extractors
-│   ├── synthesizer.py                 # Perplexity note synthesis & markdown parsers
-│   ├── classifier.py                  # gpt-5.6-luna taxonomy classification (mtr_subjects/topics/subtopics)
-│   ├── image_generator.py             # Azure OpenAI (gpt-image-2) infographic generation & Blob upload
+│   ├── crawler.py                     # Generic Crawl4AI engine, direct bypass extractors & universal sanitizer
+│   ├── synthesizer.py                 # Azure OpenAI primary & Perplexity fallback synthesis engine
+│   ├── classifier.py                  # gpt-6-luna taxonomy classification (mtr_subjects/topics/subtopics)
+│   ├── image_generator.py             # Azure OpenAI (gpt-image-2.5-flare) infographic generation & Blob upload
 │   ├── validator.py                   # Data quality verification & dummy content guards
-│   ├── pipeline.py                    # Single article orchestration service
+│   ├── pipeline.py                    # Single article end-to-end orchestration service
 │   └── excel_processor.py             # Batch Excel reader, concurrent image tasks, bulk job tracking
 ├── logs/                              # Audit logs (ca_status_log_<timestamp>.csv, ca_status_log_latest.csv)
-├── ca_local_main.py                   # CLI entrypoint wrapper
-├── pyproject.toml                     # Dependency declarations
-└── README.md                          # System documentation
+├── generated_images/                  # Local cache of generated editorial infographics ({id}.jpg)
+├── ca_local_main.py                   # CLI entrypoint for batch processing
+├── load_to_pilot_db.py                # Database migration & promotion script (mntor_dev -> pilot_db)
+├── pyproject.toml                     # Dependency definitions (managed via uv)
+├── .env                               # Centralized credentials, model deployments, and system settings
+└── README.md                          # Architectural & operational documentation
 ```
 
 ---
 
-## 2. Models in Use
+## 2. End-to-End Pipeline Architecture
 
-| Capability | Model | Provider | Key / Configuration |
+```mermaid
+flowchart TD
+    A[Input: ca_lists.xlsx] --> B[Batch Reader & Job Init\nexcel_processor.py]
+    B --> C{Pre-Screening}
+    
+    C -->|Unsupported URL / Media / E-paper| D[Mark Failed in Audit Log]
+    C -->|Duplicate URL in DB| E[Skip Row & Log Duplicate\n< 1 sec]
+    C -->|Valid New Link| F[Content Extraction Engine\ncrawler.py]
+    
+    subgraph Extraction_Tier [Extraction & Sanitization Tier]
+        F --> G{Network-Level Bypass?}
+        G -->|Times of India| H[Direct JSON-LD\nHTTP Parser]
+        G -->|The Hindu| I[Direct Server HTML\nPre-Paywall Parser]
+        G -->|PIB| J[Direct ASPX / Form\nHTTP Parser]
+        G -->|All Other Domains| K[Headless Chromium\nCrawl4AI + Anti-Bot]
+        
+        K -->|Headless Blocked / Failed| L[Generic Wayback Machine\nArchive Cache Fallback]
+        
+        H --> M[Raw Extracted Text]
+        I --> M
+        J --> M
+        K --> M
+        L --> M
+        
+        M --> N[Universal Text Sanitizer\nclean_scraped_text]
+        N -->|Strip AI Disclaimers, App Promos,\nBoilerplate & Copyrights| O[Cleaned Universal Text]
+        
+        O --> P{Gate: Body >= 300 chars\n& No Compound WAF Block?}
+        P -->|No| Q[Fail Closed\nAbort Row: No Hallucination]
+    end
+    
+    P -->|Yes| R[UPSC Synthesis Engine\nsynthesizer.py]
+    
+    subgraph Synthesis_Tier [Synthesis & Classification Tier]
+        R --> S{Provider Router}
+        S -->|Primary| T[Azure OpenAI gpt-6-luna\nStrict English Constraint]
+        S -->|Fallback| U[Perplexity AI sonar-pro\nsonar-reasoning]
+        
+        T --> V[Markdown Section Splitter\nTitle, Subtitle, Highlights, Keywords]
+        U --> V
+        
+        V --> W{Validation Gate\nvalidator.py}
+        W -->|Dummy / Error Marker / Short| X[Reject Row]
+        W -->|Pass| Y{Taxonomy Missing\nTheme / Topic / Subtopic?}
+        Y -->|Yes| Z[gpt-6-luna Classifier\nagainst DB Taxonomy]
+        Y -->|No| AA[Retain File Taxonomy]
+        Z --> AB[Write Taxonomy to Excel & Memory]
+        AA --> AB
+    end
+    
+    AB --> AC[Database Persistence\nInsert mntor_dev records]
+    
+    subgraph Async_Infographic_Tier [Concurrent Infographic Tier]
+        AC --> AD[Dispatch Async Background Task\nimage_generator.py]
+        AD --> AE[Azure OpenAI gpt-image-2.5-flare\nEditorial Infographic]
+        AE --> AF[Save Local JPG & Upload\nAzure Blob Storage thumbnail/id.jpg]
+        AF --> AG[Update mtr_ca_images_edk]
+    end
+    
+    AC --> AH[Immediate Next Row Ingestion\nZero Idle Wait]
+    AH --> B
+    
+    subgraph Promotion_Tier [Database Promotion Tier]
+        AI[Dev DB: mntor_dev] --> AJ[Quality Audit & Regex Check\nverify_dev_records]
+        AJ -->|Pass| AK[Promote to pilot_db / Prod\nPreserving Exact IDs]
+    end
+```
+
+---
+
+## 3. Subsystem Breakdown
+
+### 1. Ingestion & Pre-Screening (`excel_processor.py`, `ca_local_main.py`)
+- **Excel Ingestion**: Loads `.xlsx` spreadsheets, dynamically maps columns (`article_url`, `theme`, `topic`, `subtopic`, `date`), and creates a unique tracking job in `mtr_ca_bulk_jobs`.
+- **Pre-Crawl Duplicate Guard**: Queries `mtr_current_affairs_edk` by canonicalized URL. If already present, skips processing in **< 1s** and records the existing article ID.
+- **Unsupported Link Filter**: Detects non-article links (e-paper viewers, video files, direct PDFs, audio streams) and halts early to prevent wasted browser overhead.
+
+### 2. Web Crawling & Universal Sanitization (`crawler.py`)
+- **Targeted Network-Level Bypasses**:
+  - **Times of India (TOI)**: Direct server-side JSON-LD extraction (`extract_toi_direct`) without browser launch.
+  - **The Hindu**: Direct HTTP server-side HTML parser (`extract_thehindu_direct`) fetching full articles before client-side paywall JavaScript executes.
+  - **PIB**: Direct HTTP scraper for Press Information Bureau releases, press notes, and factsheets (`extract_pib_direct`).
+- **Generic Headless Chromium (`Crawl4AI`)**:
+  - Used for standard news sites (LiveMint, Indian Express, BBC, IDSA, DownToEarth, etc.).
+  - Employs anti-bot bypass parameters, BM25 content filtering, dynamic scrolling, and overlay removal.
+- **Universal Text Sanitizer (`clean_scraped_text`)**:
+  - Strips AI auto-translation banners (Devanagari/English notices, e.g. Indian Express translation widgets).
+  - Removes publisher app download promotions, newsletter prompts, and social media links.
+  - Removes syndication footers, "Also Read" prefixes, and copyright notices universally from **any** crawled content.
+- **Generic Wayback Machine Fallback (`fetch_with_fallback`)**:
+  - Automatically queries the Internet Archive Wayback endpoint when live crawls fail for any domain.
+- **Safe WAF Detection**:
+  - Uses regex word boundaries (`\bwaf\b`) and compound phrases (`cloudflare waf`, `aws waf`) to prevent false-positive blocks on semiconductor "wafer" articles.
+- **Strict Fail-Closed Policy**:
+  - Rejects any crawl with `< 300` characters or verified block indicators.
+  - Guarantees **no synthetic hallucinations or images are ever generated for missing/blocked content**.
+
+### 3. Synthesis & Markdown Parsing (`synthesizer.py`)
+- **Dual-Provider Architecture**:
+  - **Primary**: Azure OpenAI **`gpt-6-luna`** for consistent, fast synthesis.
+  - **Fallback**: Perplexity AI **`sonar-pro`** (with automatic fallback to `sonar-reasoning`).
+- **Critical Language Constraint**:
+  - Enforces `CRITICAL LANGUAGE CONSTRAINT: All generated outputs must strictly and exclusively be in English.` in the system prompt. Even if source text contains vernacular snippets, output notes are 100% English.
+- **Strict UPSC Formatting**:
+  - Generates level-5 markdown headers (`#####`).
+  - Standardized GS paper tag: `<span class="evaluation-result-card-but">GS II (Governance), GS III (Economy)</span>`.
+  - Structured sections: *Key Takeaways*, *Historical Context & Relevant Data*, *Analysis & Implications*, *Way Forward*, and *Keywords*.
+- **Resilient Markdown Section Splitter**:
+  - Isolates Title, Subtitle (15–20 word summary), Highlights, and Keywords cleanly regardless of markdown header styling.
+
+### 4. Syllabus Taxonomy Classification (`classifier.py`)
+- Dynamically queries syllabus taxonomies from `mtr_subjects`, `mtr_topics`, and `mtr_subtopics`.
+- When `theme_topic` or `theme_subtopic` is missing, sends synthesized metadata (title, subtitle, keywords) to **`gpt-6-luna`** to map the content to the official UPSC syllabus tree.
+- Automatically writes back resolved classifications into the source Excel spreadsheet.
+
+### 5. Asynchronous Infographic Generation (`image_generator.py`)
+- **Parallel Non-Blocking Execution with Concurrency Throttling**: Once an article's notes and database records are staged (~8s), image generation is dispatched to a background queue governed by an `asyncio.Semaphore(1)`. This serializes requests to Azure OpenAI, completely preventing HTTP 429 rate-limit backoffs (which previously inflated elapsed times to 160+s).
+- **Landscape Editorial Infographic**: Retains standard **`1536x1024`** landscape format (`AZURE_IMAGE_SIZE`) matching the card banners in the student UI without cropping top/bottom text or diagrams.
+- **Detailed Sub-Step Telemetry**: Logs granular timing: AI generation, local JPEG optimization, and Azure Blob Storage upload.
+
+### 6. Relational Persistence & Promotion (`database.py`, `load_to_pilot_db.py`)
+- **Granular Timing Audit Logging**: Emits real-time link-by-link execution details to `logs/ca_status_log_<timestamp>.csv` (mirrored to `ca_status_log_latest.csv`) including individual step timing columns: `scrape_sec`, `synthesis_sec`, `taxonomy_sec`, `db_sec`, and `total_sec`.
+- **Multi-Stage Promotion**: `load_to_pilot_db.py` audits `mntor_dev` with regex checks to ensure 0 corrupted/dummy records exist before promoting rows into `pilot_db` / `prod`, strictly preserving exact primary key IDs across all 4 tables.
+
+---
+
+## 4. Models & Providers in Use
+
+| Capability | Model | Provider | Deployment / Env Config |
 | :--- | :--- | :--- | :--- |
-| **Taxonomy Classification** | **`gpt-5.6-luna`** | **Azure OpenAI** | `MODEL_GENERATOR` |
-| **UPSC Notes Synthesis (Primary)** | **`sonar-pro`** | **Perplexity AI** | `CA_GEN_PPLEX_API_KEY` |
-| **UPSC Notes Synthesis (Fallback)** | **`sonar-reasoning`** | **Perplexity AI** | `CA_GEN_PPLEX_API_KEY` |
-| **Infographic Image Generation** | **`gpt-image-2`** | **Azure OpenAI** | `CA_GEN_AZURE_OPENAI_IMAGE_DEPLOYMENT` |
+| **UPSC Notes Synthesis (Primary)** | **`gpt-6-luna`** | **Azure OpenAI** | `SYNTHESIS_PRIMARY_PROVIDER=azure`<br>`AZURE_SYNTHESIS_MODEL=gpt-6-luna` |
+| **UPSC Notes Synthesis (Fallback)** | **`sonar-pro` / `sonar-reasoning`** | **Perplexity AI** | `PRIMARY_SYNTHESIS_MODEL=sonar-pro`<br>`FALLBACK_SYNTHESIS_MODEL=sonar-reasoning` |
+| **Taxonomy Classification** | **`gpt-6-luna`** | **Azure OpenAI** | `MODEL_GENERATOR=gpt-6-luna` |
+| **Infographic Image Generation** | **`gpt-image-2.5-flare`** | **Azure OpenAI** | `CA_GEN_AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-2.5-flare` |
 
 ---
 
-## 3. Key Pipeline Features
+## 5. Database Schema & Tables
 
-### A. Parallel, Non-Blocking Execution
-- **Zero Idle Wait**: Once an article completes notes generation and database staging (~8s), its infographic generation (`gpt-image-2`) and Azure Blob upload run as a concurrent background task.
-- The crawler immediately proceeds to fetch the subsequent row without waiting for the 15–20s image generation to finish.
-- All background tasks are awaited before finalizing the bulk job status.
+The pipeline synchronizes four core tables per article across database environments (`mntor_dev`, `pilot_db`):
 
-### B. Automated Taxonomy Classification
-- When `theme_topic` or `theme_subtopic` is blank in the input spreadsheet, the pipeline triggers `current_affairs.classifier.classify_topic_subtopic()`.
-- It dynamically queries `mtr_subjects`, `mtr_topics`, and `mtr_subtopics` in the development database.
-- It leverages the synthesized `title`, `subtitle`, and `keywords` (instead of raw 3,000-word HTML) with `gpt-5.6-luna` to pick the exact topic and subtopic with minimal token consumption.
-- The classified topic and subtopic are saved into `mtr_current_affairs_edk` **and** written back into the Excel spreadsheet cells.
-
-### C. Pre-Crawl Duplicate Guard
-- Before initiating browser crawls, the pipeline checks `mtr_current_affairs_edk` for existing matching URLs.
-- Duplicates are skipped in **under 1 second**, recorded in `mtr_ca_bulk_jobs` with details:
-  ```json
-  [{"row": 2, "url": "...", "reason": "Duplicate (id=9877)", "status": "skipped"}]
-  ```
-- Directly compatible with SQL queries:
-  ```sql
-  SELECT * FROM mtr_ca_bulk_jobs WHERE details LIKE '%Duplicate%';
-  ```
-
-### D. File-Preserved Dates
-- Dates (`ca_created_date` and `created_at`) strictly follow the date specified in the Excel sheet (`DD-MM-YYYY`), with `created_at` set to `16:07:07` on that specified date.
-
-### E. Isolated Logging
-- Link-by-link outcome logs are written directly to `logs/ca_status_log_<timestamp>.csv`, and a copy is maintained at `logs/ca_status_log_latest.csv`.
+| Table | Primary Key | Key Attributes | Description |
+| :--- | :--- | :--- | :--- |
+| **`mtr_current_affairs_edk`** | `id` (INT) | `topic`, `content`, `theme`, `theme_topic`, `theme_subtopic`, `ca_created_date`, `created_at`, `source` | Core article metadata and 15–20 word summary (`content`). |
+| **`mtr_ca_highlights_edk`** | `id` (INT) | `current_affair_id`, `highlight_text`, `created_at` | Full UPSC coaching notes formatted with level-5 markdown headers and GS badges. |
+| **`mtr_ca_images_edk`** | `id` (INT) | `current_affair_id`, `image_url`, `created_at` | Azure Blob Storage CDN URL pointing to `thumbnail/{id}.jpg`. |
+| **`mtr_ca_kword_edk`** | `id` (INT) | `current_affair_id`, `kword` | Comma-separated high-yield UPSC exam keywords. |
+| **`mtr_ca_bulk_jobs`** | `id` (UUID) | `status`, `total_records`, `successful_records`, `failed_records`, `details` (JSON), `started_at`, `completed_at` | Batch job execution telemetry and row-by-row audit trails. |
 
 ---
 
-## 4. Multi-Stage Database Promotion (Dev ➔ Test ➔ Prod)
+## 6. CLI Usage & Operations
 
-### Validation Rules (`current_affairs.validator`)
-Before any record is promoted across environments, `validate_article_for_db(article_id, db)` verifies:
-1. **Topic**: Must not contain dummy strings (`lorem ipsum`, `dummy`, `test`, `untitled`) or HTTP error markers (`403 forbidden`, `404 not found`, `access denied`).
-2. **Subtitle**: Must be substantive (> 20 chars) and free of placeholder text.
-3. **Taxonomy**: `theme`, `theme_topic`, and `theme_subtopic` must all be populated and valid.
-4. **Highlights**: UPSC level-5 markdown headers (`#####`) present, minimum 400 characters.
-5. **Image URL**: Must match Azure Blob format (`https://...blob.core.windows.net/thumbnail/{article_id}.jpg`).
-6. **Keywords**: At least 2 comma-separated tags present in `mtr_ca_kword_edk`.
-
-### Exact ID Preservation
-Because the infographic image is generated once during initial ingestion and uploaded as `thumbnail/<article_id>.jpg`, the same primary key `id` must be preserved when promoting records from `mntor_dev` ➔ `mntor_test` ➔ `mntor_prod`.
-
-Migration script pattern:
-```sql
--- Explicitly insert existing primary key ID
-INSERT INTO mtr_current_affairs_edk (id, topic, content, theme, theme_topic, theme_subtopic, ca_created_date, created_at, source, view_count, pinecone_synced)
-VALUES (:id, :topic, :content, :theme, :theme_topic, :theme_subtopic, :ca_created_date, :created_at, :source, :view_count, :pinecone_synced);
-
-INSERT INTO mtr_ca_highlights_edk (id, current_affair_id, highlight_text, created_at)
-VALUES (:id, :id, :highlight_text, :created_at);
-
-INSERT INTO mtr_ca_images_edk (id, current_affair_id, image_url, created_at)
-VALUES (:id, :id, :image_url, :created_at);
-
-INSERT INTO mtr_ca_kword_edk (id, current_affair_id, kword)
-VALUES (:id, :id, :kword);
-```
-
----
-
-## 5. Usage & CLI Commands
-
-### Run the Ingestion Batch
-To process articles from `ca_lists.xlsx`:
+### 1. Run Local Ingestion Batch
+Process the default spreadsheet (`ca_lists.xlsx`):
 ```bash
 ./.venv/bin/python ca_local_main.py ca_lists.xlsx
 ```
 
-Or process a custom spreadsheet:
+### 2. Promote Records from Dev to Pilot/Test
+Verify quality and promote all new articles above a specific minimum ID:
 ```bash
-./.venv/bin/python ca_local_main.py custom_file.xlsx
+./.venv/bin/python load_to_pilot_db.py --min-id 10108
 ```
 
-### Programmatic Python Usage
+### 3. Programmatic Invocation
 ```python
 import asyncio
 from current_affairs import process_excel_file, validate_article_for_db, get_db_session
 
-# Run batch
+# Run batch ingestion
 asyncio.run(process_excel_file("ca_lists.xlsx"))
 
-# Validate article quality in DB
+# Validate article quality in database
 with get_db_session() as session:
-    is_valid, issues = validate_article_for_db(article_id=9877, db=session)
-    print(f"Article 9877 valid: {is_valid}, Issues: {issues}")
+    is_valid, issues = validate_article_for_db(article_id=10231, db=session)
+    print(f"Article 10231 valid: {is_valid}, Issues: {issues}")
 ```

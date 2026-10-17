@@ -15,6 +15,7 @@ from current_affairs.config import (
     IMAGE_OUTPUT_DIR,
     IMAGE_TIMEOUT,
     DEFAULT_MAX_RETRIES,
+    AZURE_IMAGE_SIZE,
 )
 
 
@@ -57,13 +58,13 @@ def get_blob_service_client() -> BlobServiceClient:
 
 def generate_and_save_image(article_id: int, topic: str, summary: str) -> str:
     """
-    Generate an infographic using Azure OpenAI (gpt-image-2), save it locally,
+    Generate an infographic using Azure OpenAI (gpt-image-2.5-flare), save it locally,
     and upload it to Azure Blob Storage at thumbnail/{article_id}.jpg.
     Returns the uploaded blob URL.
     """
     t_start = time.time()
     try:
-        print(f"[IMAGE] Starting image generation for article {article_id}: {topic}", flush=True)
+        print(f"[IMAGE] Starting background image task for article {article_id} ({AZURE_IMAGE_SIZE}): {topic[:50]}...", flush=True)
 
         image_client = get_image_client()
         prompt = gen_image_prompt(topic, summary)
@@ -72,10 +73,11 @@ def generate_and_save_image(article_id: int, topic: str, summary: str) -> str:
         response = image_client.images.generate(
             model=AZURE_OPENAI_IMAGE_DEPLOYMENT,
             prompt=prompt,
-            size="1536x1024",
+            size=AZURE_IMAGE_SIZE,
         )
         gen_duration = round(time.time() - t_gen, 1)
 
+        t_save = time.time()
         image_b64 = response.data[0].b64_json
         image_bytes = base64.b64decode(image_b64)
 
@@ -88,8 +90,7 @@ def generate_and_save_image(article_id: int, topic: str, summary: str) -> str:
             quality=82,
             optimize=True,
         )
-
-        print(f"[IMAGE] Generated image in {gen_duration}s for article {article_id}: {image_path}", flush=True)
+        save_duration = round(time.time() - t_save, 2)
 
         blob_name = f"{article_id}.jpg"
         t_blob = time.time()
@@ -106,7 +107,11 @@ def generate_and_save_image(article_id: int, topic: str, summary: str) -> str:
         blob_duration = round(time.time() - t_blob, 1)
         total_img_duration = round(time.time() - t_start, 1)
 
-        print(f"[IMAGE] Azure Blob upload completed in {blob_duration}s (Total image pipeline: {total_img_duration}s): {blob_url}", flush=True)
+        print(
+            f"[IMAGE] Article {article_id} completed in {total_img_duration}s "
+            f"[AI Gen: {gen_duration}s | Save: {save_duration}s | Blob: {blob_duration}s] -> {blob_url}",
+            flush=True,
+        )
         return blob_url
 
     except Exception as e:

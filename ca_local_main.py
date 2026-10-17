@@ -2,7 +2,7 @@
 """
 Current Affairs Service CLI Entrypoint.
 Reads an input Excel file (default: ca_lists.xlsx), scrapes news articles using Crawl4AI,
-synthesizes UPSC notes via Perplexity, classifies topics/subtopics via gpt-5.6-luna,
+synthesizes UPSC notes via Perplexity, classifies topics/subtopics via gpt-6-luna,
 generates infographics via Azure OpenAI, uploads them to Azure Blob Storage,
 and stores records into the development MySQL database (mntor_dev).
 
@@ -30,10 +30,14 @@ from current_affairs import (
 )
 
 
+from pathlib import Path
+
+
 def main():
-    target_file = sys.argv[1] if len(sys.argv) > 1 else "ca_lists.xlsx"
+    script_dir = Path(__file__).resolve().parent
+    target_file = script_dir / "ca_lists.xlsx"
     print(f"[CLI] Launching Current Affairs pipeline on: {target_file}", flush=True)
-    asyncio.run(process_excel_file(target_file))
+    asyncio.run(process_excel_file(str(target_file)))
 
 
 if __name__ == "__main__":

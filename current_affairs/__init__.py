@@ -19,7 +19,7 @@ from current_affairs.database import (
     BulkJob,
     get_db_session,
 )
-from current_affairs.crawler import fetch_article, preprocess_url
+from current_affairs.crawler import fetch_article, preprocess_url, clean_scraped_text
 from current_affairs.synthesizer import (
     generate_content,
     build_system_prompt,
@@ -47,6 +47,7 @@ __all__ = [
     "BulkJob",
     "get_db_session",
     "fetch_article",
+    "clean_scraped_text",
     "preprocess_url",
     "generate_content",
     "build_system_prompt",

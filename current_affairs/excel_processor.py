@@ -9,8 +9,8 @@ import openpyxl
 
 from crawl4ai import AsyncWebCrawler
 
-from current_affairs.config import LOGS_DIR, BASE_DIR
-from current_affairs.crawler import preprocess_url, get_default_browser_config
+from current_affairs.config import LOGS_DIR, BASE_DIR, IMAGE_CONCURRENCY
+from current_affairs.crawler import preprocess_url, get_default_browser_config, check_unsupported_url
 from current_affairs.database import get_db_session, CurrentAffair, BulkJob
 from current_affairs.pipeline import process_article_service
 from current_affairs.validator import classify_failure_reason
@@ -23,7 +23,7 @@ async def process_excel_file(
 ) -> str:
     """
     Read an Excel file of current affairs articles, process them sequentially with Crawl4AI,
-    run image generation concurrently in the background, classify missing topics via gpt-5.6-luna,
+    run image generation concurrently in the background, classify missing topics via gpt-6-luna,
     skip duplicates, and maintain audit logs in logs/ and mtr_ca_bulk_jobs.
     """
     if not os.path.isabs(excel_path):
@@ -80,6 +80,11 @@ async def process_excel_file(
         "article_id",
         "failure_category",
         "failure_reason",
+        "scrape_sec",
+        "synthesis_sec",
+        "taxonomy_sec",
+        "db_sec",
+        "total_sec",
         "error_details",
         "processed_at",
     ]
@@ -117,6 +122,7 @@ async def process_excel_file(
     failed_count = 0
     skipped_count = 0
     pending_image_tasks = []
+    image_semaphore = asyncio.Semaphore(IMAGE_CONCURRENCY)
 
     browser_config = get_default_browser_config()
 
@@ -165,7 +171,46 @@ async def process_excel_file(
                         "article_id": "",
                         "failure_category": cat,
                         "failure_reason": reason,
+                        "scrape_sec": "",
+                        "synthesis_sec": "",
+                        "taxonomy_sec": "",
+                        "db_sec": "",
+                        "total_sec": "",
                         "error_details": f"Raw cell value: {repr(url_raw)}",
+                        "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                    log_file.flush()
+                    continue
+
+                # Pre-screen unsupported URL types (e.g. binary media, e-paper viewers)
+                unsupported_reason = check_unsupported_url(url)
+                if unsupported_reason:
+                    failed_count += 1
+                    processed_count += 1
+                    cat, reason = "UNSUPPORTED_URL_TYPE", f"URL cannot be processed: {unsupported_reason}"
+                    print(f"\n[{processed_count}] Row {row_num} ({url}): [FAILED] [{cat}] {reason}", flush=True)
+                    job_details.append({
+                        "row": row_num,
+                        "url": url,
+                        "status": "failed",
+                        "reason": reason
+                    })
+                    log_writer.writerow({
+                        "row_num": row_num,
+                        "status": "FAILURE",
+                        "url": url,
+                        "date": str(date_raw) if date_raw else "",
+                        "theme": theme_val,
+                        "topic": topic_val or "",
+                        "article_id": "",
+                        "failure_category": cat,
+                        "failure_reason": reason,
+                        "scrape_sec": "",
+                        "synthesis_sec": "",
+                        "taxonomy_sec": "",
+                        "db_sec": "",
+                        "total_sec": "",
+                        "error_details": unsupported_reason,
                         "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
                     log_file.flush()
@@ -198,6 +243,11 @@ async def process_excel_file(
                         "article_id": existing_article.id,
                         "failure_category": "DUPLICATE",
                         "failure_reason": dup_reason,
+                        "scrape_sec": "",
+                        "synthesis_sec": "",
+                        "taxonomy_sec": "",
+                        "db_sec": "",
+                        "total_sec": "",
                         "error_details": "",
                         "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
@@ -226,6 +276,11 @@ async def process_excel_file(
                         "article_id": "",
                         "failure_category": cat,
                         "failure_reason": reason,
+                        "scrape_sec": "",
+                        "synthesis_sec": "",
+                        "taxonomy_sec": "",
+                        "db_sec": "",
+                        "total_sec": "",
                         "error_details": "ca_created_date cell is empty",
                         "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
@@ -253,6 +308,7 @@ async def process_excel_file(
                         theme_subtopic=subtopic_val,
                         wait_for_image=False,
                         crawler=shared_crawler,
+                        image_semaphore=image_semaphore,
                     )
                     if result.get("image_task"):
                         pending_image_tasks.append(result["image_task"])
@@ -287,6 +343,7 @@ async def process_excel_file(
                         "theme_topic": resolved_topic,
                         "theme_subtopic": resolved_subtopic,
                     })
+                    timings = result.get("timings", {})
                     log_writer.writerow({
                         "row_num": row_num,
                         "status": "SUCCESS",
@@ -297,6 +354,11 @@ async def process_excel_file(
                         "article_id": result.get("id", ""),
                         "failure_category": "",
                         "failure_reason": "",
+                        "scrape_sec": timings.get("scrape", ""),
+                        "synthesis_sec": timings.get("synthesis", ""),
+                        "taxonomy_sec": timings.get("taxonomy", ""),
+                        "db_sec": timings.get("db", ""),
+                        "total_sec": timings.get("total", ""),
                         "error_details": "",
                         "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
@@ -323,6 +385,11 @@ async def process_excel_file(
                         "article_id": "",
                         "failure_category": cat,
                         "failure_reason": reason,
+                        "scrape_sec": "",
+                        "synthesis_sec": "",
+                        "taxonomy_sec": "",
+                        "db_sec": "",
+                        "total_sec": "",
                         "error_details": str(ex).replace("\n", " ")[:500],
                         "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })

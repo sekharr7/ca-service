@@ -1,9 +1,23 @@
 import re
 import time
 from typing import Tuple
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 
-from current_affairs.config import PPLEX_API_KEY, LLM_TIMEOUT, DEFAULT_MAX_RETRIES
+from current_affairs.config import (
+    SYNTHESIS_PRIMARY_PROVIDER,
+    AZURE_SYNTHESIS_MODEL,
+    CA_GEN_AZURE_OPENAI_API_KEY,
+    CA_GEN_AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION,
+    PRIMARY_SYNTHESIS_MODEL,
+    FALLBACK_SYNTHESIS_MODEL,
+    PPLEX_API_KEY,
+    PPLEX_BASE_URL,
+    LLM_TIMEOUT,
+    LLM_TEMPERATURE,
+    LLM_MAX_TOKENS,
+    DEFAULT_MAX_RETRIES,
+)
 
 
 def build_system_prompt() -> str:
@@ -11,6 +25,9 @@ def build_system_prompt() -> str:
 You are an advanced content generator creating markdown material for UPSC aspirants, specifically tailored for database storage and frontend markdown rendering. Your outputs will be referenced by serious exam candidates, so maintain a formal, informative, and concise tone throughout, as if writing official coaching notes or GS exam preparation material. 
 
 Use Bold, underline and Italics as appropriate to highlight important areas (most important don't skip this)
+
+**CRITICAL LANGUAGE CONSTRAINT:**
+All outputs must strictly and exclusively be in English. Under NO circumstances should any part of the output (Topic Name, Description, Subtitle, Section Titles, Body Text, Analysis, or Keywords) be generated in Hindi or any other vernacular language, even if the source article contains Hindi text, vernacular quotes, or auto-translation disclaimer banners. Translate all concepts into professional English.
 
 **Task Structure:**
 - Use *level-5 markdown headers* (#####) only, never lower or higher.
@@ -41,14 +58,11 @@ Use Bold, underline and Italics as appropriate to highlight important areas (mos
 
 
 def generate_content(article_text: str, system_prompt: str) -> str:
-    """Generate structured educational UPSC notes using Perplexity sonar-pro/sonar-reasoning."""
+    """
+    Generate structured educational UPSC notes.
+    Defaults to Azure OpenAI (gpt-6-luna) as primary, with Perplexity (sonar-pro/sonar-reasoning) as fallback.
+    """
     t_llm = time.time()
-    client = OpenAI(
-        api_key=PPLEX_API_KEY,
-        base_url="https://api.perplexity.ai",
-        timeout=LLM_TIMEOUT,
-        max_retries=DEFAULT_MAX_RETRIES,
-    )
     messages = [
         {"role": "system", "content": system_prompt},
         {
@@ -62,35 +76,63 @@ Generate comprehensive educational content following the exact template structur
         }
     ]
 
-    primary_err = None
-    try:
-        response = client.chat.completions.create(
-            model="sonar-pro",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=3000,
-        )
-        if response.choices and response.choices[0].message.content:
-            duration = round(time.time() - t_llm, 1)
-            print(f"[LLM] Perplexity notes generated with sonar-pro in {duration}s", flush=True)
-            return response.choices[0].message.content
-    except Exception as e1:
-        primary_err = e1
-        print(f"[LLM] sonar-pro attempt failed ({e1}) after {round(time.time() - t_llm, 1)}s, trying sonar-reasoning...", flush=True)
+    # Primary: Azure OpenAI (gpt-6-luna)
+    if SYNTHESIS_PRIMARY_PROVIDER == "azure" and CA_GEN_AZURE_OPENAI_API_KEY and CA_GEN_AZURE_OPENAI_ENDPOINT:
+        try:
+            azure_client = AzureOpenAI(
+                api_key=CA_GEN_AZURE_OPENAI_API_KEY,
+                azure_endpoint=CA_GEN_AZURE_OPENAI_ENDPOINT,
+                api_version=AZURE_OPENAI_API_VERSION,
+                timeout=LLM_TIMEOUT,
+                max_retries=DEFAULT_MAX_RETRIES,
+            )
+            resp = azure_client.chat.completions.create(
+                model=AZURE_SYNTHESIS_MODEL,
+                messages=messages,
+                max_completion_tokens=LLM_MAX_TOKENS,
+            )
+            if resp.choices and resp.choices[0].message.content:
+                duration = round(time.time() - t_llm, 1)
+                print(f"[LLM] UPSC notes generated via Azure OpenAI ({AZURE_SYNTHESIS_MODEL}) in {duration}s", flush=True)
+                return resp.choices[0].message.content
+        except Exception as azure_err:
+            print(f"[LLM] Azure OpenAI ({AZURE_SYNTHESIS_MODEL}) failed ({azure_err}) after {round(time.time() - t_llm, 1)}s, falling back to Perplexity...", flush=True)
+
+    # Fallback / Secondary: Perplexity AI
+    pplex_client = OpenAI(
+        api_key=PPLEX_API_KEY,
+        base_url=PPLEX_BASE_URL,
+        timeout=LLM_TIMEOUT,
+        max_retries=DEFAULT_MAX_RETRIES,
+    )
 
     try:
-        response = client.chat.completions.create(
-            model="sonar-reasoning",
+        response = pplex_client.chat.completions.create(
+            model=PRIMARY_SYNTHESIS_MODEL,
             messages=messages,
-            temperature=0.3,
-            max_tokens=3000,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS,
         )
         if response.choices and response.choices[0].message.content:
             duration = round(time.time() - t_llm, 1)
-            print(f"[LLM] Perplexity notes generated with sonar-reasoning in {duration}s", flush=True)
+            print(f"[LLM] UPSC notes generated with Perplexity ({PRIMARY_SYNTHESIS_MODEL}) in {duration}s", flush=True)
+            return response.choices[0].message.content
+    except Exception as e1:
+        print(f"[LLM] Perplexity ({PRIMARY_SYNTHESIS_MODEL}) failed ({e1}) after {round(time.time() - t_llm, 1)}s, trying {FALLBACK_SYNTHESIS_MODEL}...", flush=True)
+
+    try:
+        response = pplex_client.chat.completions.create(
+            model=FALLBACK_SYNTHESIS_MODEL,
+            messages=messages,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS,
+        )
+        if response.choices and response.choices[0].message.content:
+            duration = round(time.time() - t_llm, 1)
+            print(f"[LLM] UPSC notes generated with Perplexity ({FALLBACK_SYNTHESIS_MODEL}) in {duration}s", flush=True)
             return response.choices[0].message.content
     except Exception as e2:
-        raise ValueError(f"Perplexity API failed on both models. sonar-pro: {primary_err} | sonar-reasoning: {e2}")
+        raise ValueError(f"Synthesis failed across all providers: Azure ({AZURE_SYNTHESIS_MODEL}) and Perplexity ({FALLBACK_SYNTHESIS_MODEL}: {e2})")
 
     return ""
 
@@ -98,7 +140,7 @@ Generate comprehensive educational content following the exact template structur
 def generate_content_from_restricted_url(url: str, headline: str = "", system_prompt: str = "") -> str:
     """
     Synthesize educational UPSC notes for paywalled/restricted articles (like TOI+)
-    using gpt-5.6-luna.
+    using gpt-6-luna.
     """
     from openai import AzureOpenAI
     from current_affairs.config import (
@@ -113,12 +155,18 @@ def generate_content_from_restricted_url(url: str, headline: str = "", system_pr
         api_key=CA_GEN_AZURE_OPENAI_API_KEY,
         azure_endpoint=CA_GEN_AZURE_OPENAI_ENDPOINT,
         api_version=AZURE_OPENAI_API_VERSION,
+        timeout=120.0,
+        max_retries=3,
     )
 
     if not headline:
-        # Infer headline from URL slug if not provided
-        slug = url.strip().rstrip("/").split("/")[-2] if "articleshow" in url else url.strip().rstrip("/").split("/")[-1]
-        headline = slug.replace("-", " ")
+        # Extract headline from path slug
+        path_part = url.split("?")[0].rstrip("/")
+        slug = path_part.split("/")[-2] if "article" in path_part.split("/")[-1] and not path_part.split("/")[-1].replace("article", "").isdigit() else path_part.split("/")[-1]
+        # Clean up article numbers and extensions
+        slug = re.sub(r'article\d+\.ece$', '', slug).strip('-_/')
+        slug = re.sub(r'\.cms$', '', slug)
+        headline = slug.replace("-", " ").strip()
 
     user_prompt = f"""The source news link is paywalled or restricted.
 HEADLINE / EVENT TOPIC: {headline}
@@ -136,7 +184,7 @@ Cover the essential facts, national/international implications, background conte
         max_completion_tokens=2500,
     )
     duration = round(time.time() - t_start, 1)
-    print(f"[LLM] Notes generated via gpt-5.6-luna for paywalled URL in {duration}s", flush=True)
+    print(f"[LLM] Notes generated via gpt-6-luna for paywalled URL in {duration}s", flush=True)
     return resp.choices[0].message.content or ""
 
 
@@ -167,41 +215,81 @@ def split_markdown_sections(md: str) -> Tuple[str, str, str, str]:
     """
     Split markdown into (title, subtitle, rest_content, keywords).
     Keywords line is stripped from rest_content.
+    Robustly handles various LLM output patterns for title, subtitle, and badge.
     """
     cleaned_md = clean_and_format_markdown(md)
 
-    kw_match = re.search(r'#####\s*Keywords:\s*(.*)', cleaned_md, re.IGNORECASE)
+    keywords = ""
+    kw_match = re.search(r'(?i)(?:^|\n)#####\s*(?:\*\*)?Keywords\s*:?\s*(?:\*\*)?\s*(.*)', cleaned_md)
+    if not kw_match:
+        kw_match = re.search(r'(?i)(?:^|\n)(?:\*\*)?Keywords\s*:?\s*(?:\*\*)?\s*(.*)', cleaned_md)
     if kw_match:
         keywords = kw_match.group(1).strip()
         cleaned_md = cleaned_md[:kw_match.start()] + cleaned_md[kw_match.end():]
+
+    cleaned_md = re.sub(r'(\n---\s*)+$', '', cleaned_md).strip()
+
+    span_tag = ""
+    span_match = re.search(r'(<span class="evaluation-result-card-but">.*?</span>)', cleaned_md, flags=re.DOTALL)
+    if span_match:
+        span_tag = span_match.group(1).strip()
+        cleaned_md = cleaned_md[:span_match.start()] + "\n" + cleaned_md[span_match.end():]
+
+    # Find the start of the first major content section
+    section_split = re.search(
+        r'(?i)(^#####\s+(?:Key Takeaways|Takeaways|Historical Context|Analysis|Way Forward|Highlights|Overview).*$)',
+        cleaned_md,
+        flags=re.MULTILINE
+    )
+
+    if section_split:
+        preamble = cleaned_md[:section_split.start()].strip()
+        body = cleaned_md[section_split.start():].strip()
     else:
-        keywords = ""
-
-    blocks = re.split(r'(^#####\s+.*$)', cleaned_md, flags=re.MULTILINE)
-    blocks = [b.strip() for b in blocks if b.strip()]
-
-    headers = []
-    rest_parts = []
-    idx = 0
-    while idx < len(blocks):
-        item = blocks[idx]
-        if item.startswith("#####"):
-            if len(headers) < 2:
-                headers.append(item.replace("#####", "").strip())
-                idx += 1
-            else:
-                body = blocks[idx + 1] if idx + 1 < len(blocks) and not blocks[idx + 1].startswith("#####") else ""
-                rest_parts.append(f"{item}\n{body}")
-                idx += 2 if body else 1
+        headers = [m.start() for m in re.finditer(r'^#####\s+', cleaned_md, flags=re.MULTILINE)]
+        if len(headers) >= 3:
+            preamble = cleaned_md[:headers[2]].strip()
+            body = cleaned_md[headers[2]:].strip()
+        elif len(headers) >= 2:
+            preamble = cleaned_md[:headers[1]].strip()
+            body = cleaned_md[headers[1]:].strip()
         else:
-            rest_parts.append(item)
-            idx += 1
+            preamble = cleaned_md
+            body = ""
 
-    title = headers[0] if len(headers) > 0 else "Untitled Topic"
-    subtitle = headers[1] if len(headers) > 1 else ""
+    p_lines = [l.strip() for l in preamble.splitlines() if l.strip()]
+    title = ""
+    subtitle = ""
+    for line in p_lines:
+        clean_line = re.sub(r'^#####\s*', '', line).strip()
+        clean_line = re.sub(r'^[\[\*\_]+|[\]\*\_]+$', '', clean_line).strip()
+        clean_line = clean_line.replace('*', '').strip()
+        if not title:
+            title = clean_line
+        elif not subtitle:
+            subtitle = clean_line
+            break
+
+    if subtitle.lower().startswith(('key takeaway', 'historical context', 'analysis', 'way forward')):
+        subtitle = ""
+
+    # If subtitle is still empty, fallback: derive from first takeaway in body
+    if not subtitle and body:
+        first_bullet = re.search(r'[-*]\s+(.*)', body)
+        if first_bullet:
+            candidate = first_bullet.group(1).replace('*', '').strip()
+            candidate = candidate.split('.')[0].strip()
+            if len(candidate) > 20:
+                subtitle = candidate
+
+    title = re.sub(r'^[\[\*\_]+|[\]\*\_]+$', '', title).strip()
+    subtitle = re.sub(r'^[\[\*\_]+|[\]\*\_]+$', '', subtitle).strip()
+
+    rest_parts = []
+    if span_tag:
+        rest_parts.append(span_tag)
+    if body:
+        rest_parts.append(body)
     rest_content = "\n\n".join(rest_parts).strip()
-
-    title = re.sub(r'^\[|\]$', '', title).strip()
-    subtitle = re.sub(r'^\[|\]$', '', subtitle).strip()
 
     return title, subtitle, rest_content, keywords
