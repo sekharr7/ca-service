@@ -5,6 +5,7 @@ from datetime import date, datetime
 from urllib.parse import urlparse
 from sqlalchemy import orm
 
+from concurrent.futures import ThreadPoolExecutor
 from crawl4ai import AsyncWebCrawler
 
 from current_affairs.crawler import fetch_article, preprocess_url, _is_blocked_response, check_unsupported_url
@@ -29,6 +30,7 @@ async def process_article_service(
     theme_subtopic: str | None = None,
     wait_for_image: bool = False,
     crawler: AsyncWebCrawler | None = None,
+    image_executor: ThreadPoolExecutor | None = None,
     image_semaphore: asyncio.Semaphore | None = None,
 ) -> dict:
     """
@@ -191,15 +193,20 @@ async def process_article_service(
         )
     else:
         print(f"[IMAGE] Enqueuing background image task for article {ca_entry.id}...", flush=True)
-
-        async def _generate_throttled():
-            if image_semaphore is not None:
-                async with image_semaphore:
+        if image_executor is not None:
+            # Immediately submits to the thread pool so generation starts in background
+            # even while the main thread proceeds with synchronous LLM synthesis of the next article!
+            cf_future = image_executor.submit(generate_and_save_image, ca_entry.id, title, subtitle)
+            image_task = asyncio.wrap_future(cf_future)
+        else:
+            async def _generate_throttled():
+                if image_semaphore is not None:
+                    async with image_semaphore:
+                        return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
+                else:
                     return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
-            else:
-                return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
 
-        image_task = asyncio.create_task(_generate_throttled())
+            image_task = asyncio.create_task(_generate_throttled())
 
     total_article_duration = round(time.time() - t_row_start, 2)
     print(

@@ -7,6 +7,7 @@ import uuid
 from datetime import date, datetime
 import openpyxl
 
+from concurrent.futures import ThreadPoolExecutor
 from crawl4ai import AsyncWebCrawler
 
 from current_affairs.config import LOGS_DIR, BASE_DIR, IMAGE_CONCURRENCY
@@ -122,7 +123,7 @@ async def process_excel_file(
     failed_count = 0
     skipped_count = 0
     pending_image_tasks = []
-    image_semaphore = asyncio.Semaphore(IMAGE_CONCURRENCY)
+    image_executor = ThreadPoolExecutor(max_workers=IMAGE_CONCURRENCY)
 
     browser_config = get_default_browser_config()
 
@@ -308,7 +309,7 @@ async def process_excel_file(
                         theme_subtopic=subtopic_val,
                         wait_for_image=False,
                         crawler=shared_crawler,
-                        image_semaphore=image_semaphore,
+                        image_executor=image_executor,
                     )
                     if result.get("image_task"):
                         pending_image_tasks.append(result["image_task"])
@@ -416,6 +417,11 @@ async def process_excel_file(
         except Exception as job_err:
             print(f"[WARN] Failed to update mtr_ca_bulk_jobs: {job_err}", flush=True)
             db.rollback()
+
+        try:
+            image_executor.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            pass
 
         db.close()
         wb.close()
