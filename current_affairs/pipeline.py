@@ -16,9 +16,20 @@ from current_affairs.synthesizer import (
     split_markdown_sections,
 )
 from current_affairs.classifier import classify_topic_subtopic
+from current_affairs.config import IMAGE_CONCURRENCY
 from current_affairs.image_generator import generate_and_save_image
 from current_affairs.validator import is_error_page_title, is_dummy_content
 from current_affairs.database import CurrentAffair, Highlight, Image, Keyword
+
+
+_DEFAULT_IMAGE_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def get_default_image_semaphore() -> asyncio.Semaphore:
+    global _DEFAULT_IMAGE_SEMAPHORE
+    if _DEFAULT_IMAGE_SEMAPHORE is None:
+        _DEFAULT_IMAGE_SEMAPHORE = asyncio.Semaphore(IMAGE_CONCURRENCY)
+    return _DEFAULT_IMAGE_SEMAPHORE
 
 
 async def process_article_service(
@@ -193,20 +204,23 @@ async def process_article_service(
         )
     else:
         print(f"[IMAGE] Enqueuing background image task for article {ca_entry.id}...", flush=True)
-        if image_executor is not None:
-            # Immediately submits to the thread pool so generation starts in background
-            # even while the main thread proceeds with synchronous LLM synthesis of the next article!
+        if image_semaphore is not None:
+            async def _generate_throttled():
+                async with image_semaphore:
+                    return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
+
+            image_task = asyncio.create_task(_generate_throttled(), name=f"img_task_{ca_entry.id}")
+        elif image_executor is not None:
+            # Submits to thread pool if executor provided
             cf_future = image_executor.submit(generate_and_save_image, ca_entry.id, title, subtitle)
             image_task = asyncio.wrap_future(cf_future)
         else:
-            async def _generate_throttled():
-                if image_semaphore is not None:
-                    async with image_semaphore:
-                        return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
-                else:
+            async def _generate_throttled_default():
+                sem = get_default_image_semaphore()
+                async with sem:
                     return await asyncio.to_thread(generate_and_save_image, ca_entry.id, title, subtitle)
 
-            image_task = asyncio.create_task(_generate_throttled())
+            image_task = asyncio.create_task(_generate_throttled_default(), name=f"img_task_{ca_entry.id}")
 
     total_article_duration = round(time.time() - t_row_start, 2)
     print(

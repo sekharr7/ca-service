@@ -27,7 +27,13 @@ from current_affairs.synthesizer import (
     split_markdown_sections,
 )
 from current_affairs.classifier import classify_topic_subtopic
-from current_affairs.image_generator import generate_and_save_image
+from current_affairs.image_generator import (
+    generate_and_save_image,
+    async_generate_and_save_image,
+    image_tracker,
+    ImageMetricsTracker,
+    ImageTaskQueue,
+)
 from current_affairs.validator import validate_article_for_db, classify_failure_reason
 from current_affairs.pipeline import process_article_service
 from current_affairs.excel_processor import process_excel_file
@@ -55,6 +61,10 @@ __all__ = [
     "split_markdown_sections",
     "classify_topic_subtopic",
     "generate_and_save_image",
+    "async_generate_and_save_image",
+    "image_tracker",
+    "ImageMetricsTracker",
+    "ImageTaskQueue",
     "validate_article_for_db",
     "classify_failure_reason",
     "process_article_service",

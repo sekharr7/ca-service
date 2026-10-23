@@ -13,6 +13,7 @@ from crawl4ai import AsyncWebCrawler
 from current_affairs.config import LOGS_DIR, BASE_DIR, IMAGE_CONCURRENCY
 from current_affairs.crawler import preprocess_url, get_default_browser_config, check_unsupported_url
 from current_affairs.database import get_db_session, CurrentAffair, BulkJob
+from current_affairs.image_generator import image_tracker
 from current_affairs.pipeline import process_article_service
 from current_affairs.validator import classify_failure_reason
 
@@ -122,8 +123,10 @@ async def process_excel_file(
     success_count = 0
     failed_count = 0
     skipped_count = 0
+    image_tracker.reset()
     pending_image_tasks = []
-    image_executor = ThreadPoolExecutor(max_workers=IMAGE_CONCURRENCY)
+    image_semaphore = asyncio.Semaphore(IMAGE_CONCURRENCY)
+    print(f"[IMAGE] Configured image generation pool with concurrency={IMAGE_CONCURRENCY}", flush=True)
 
     browser_config = get_default_browser_config()
 
@@ -309,7 +312,7 @@ async def process_excel_file(
                         theme_subtopic=subtopic_val,
                         wait_for_image=False,
                         crawler=shared_crawler,
-                        image_executor=image_executor,
+                        image_semaphore=image_semaphore,
                     )
                     if result.get("image_task"):
                         pending_image_tasks.append(result["image_task"])
@@ -398,9 +401,41 @@ async def process_excel_file(
 
             # Await any concurrent image generation tasks before completing the batch job
             if pending_image_tasks:
-                print(f"\n[IMAGE] Awaiting completion of {len(pending_image_tasks)} background image task(s)...", flush=True)
-                await asyncio.gather(*pending_image_tasks, return_exceptions=True)
+                print(f"\n[IMAGE] Awaiting completion of {len(pending_image_tasks)} background image task(s) (concurrency: {IMAGE_CONCURRENCY})...", flush=True)
+                image_results = await asyncio.gather(*pending_image_tasks, return_exceptions=True)
                 print(f"[IMAGE] All background image generation and Azure Blob upload tasks completed.", flush=True)
+
+                # Check if any tasks failed with an exception
+                image_failures = [r for r in image_results if isinstance(r, Exception)]
+                if image_failures:
+                    print(f"[IMAGE] Notice: {len(image_failures)} background image task(s) encountered errors.", flush=True)
+
+            # Print telemetry summary and export image metrics
+            image_tracker.print_summary()
+            img_log_path = LOGS_DIR / f"image_generation_log_{log_timestamp}.csv"
+            img_latest_log_path = LOGS_DIR / "image_generation_log_latest.csv"
+            image_tracker.export_csv(img_log_path)
+            try:
+                shutil.copyfile(str(img_log_path), str(img_latest_log_path))
+            except Exception:
+                pass
+            image_tracker.export_json(LOGS_DIR / "image_metrics_latest.json")
+
+            # Correlate image metrics with job_details
+            img_records_by_id = {r.article_id: r for r in image_tracker.records}
+            for item in job_details:
+                aid = item.get("id")
+                if aid and aid in img_records_by_id:
+                    rec = img_records_by_id[aid]
+                    item["image_status"] = rec.status
+                    item["image_latency_sec"] = rec.latency
+                    item["image_gen_sec"] = rec.gen_duration
+                    item["image_save_sec"] = rec.save_duration
+                    item["image_blob_sec"] = rec.blob_duration
+                    item["image_retries"] = rec.retries
+                    item["image_blob_url"] = rec.blob_url
+                    if rec.status == "FAILURE":
+                        item["image_error"] = rec.error
 
     finally:
         # Update bulk_job in database
@@ -418,11 +453,6 @@ async def process_excel_file(
             print(f"[WARN] Failed to update mtr_ca_bulk_jobs: {job_err}", flush=True)
             db.rollback()
 
-        try:
-            image_executor.shutdown(wait=False, cancel_futures=False)
-        except Exception:
-            pass
-
         db.close()
         wb.close()
         log_file.close()
@@ -431,14 +461,20 @@ async def process_excel_file(
         except Exception:
             pass
 
+    img_summary = image_tracker.get_summary()
     print(f"\n==================================================")
     print(f"[BATCH COMPLETED]")
-    print(f"  Bulk Job ID:          {job_id}")
+    print(f"  Bulk Job ID:           {job_id}")
     print(f"  Total links evaluated: {processed_count}")
-    print(f"  Successful:           {success_count}")
-    print(f"  Skipped (Duplicate):  {skipped_count}")
-    print(f"  Failed:               {failed_count}")
-    print(f"  Status Log File:      {log_filepath}")
-    print(f"  Latest Log Copy:      {latest_log_path}")
+    print(f"  Successful:            {success_count}")
+    print(f"  Skipped (Duplicate):   {skipped_count}")
+    print(f"  Failed:                {failed_count}")
+    print(f"  Images Generated:      {img_summary['succeeded']}/{img_summary['total']} (Failed: {img_summary['failed']}, 429 Retries: {img_summary['total_429_retries']})")
+    if img_summary['succeeded'] > 0:
+        print(f"  Image Avg Latency:     {img_summary['avg_latency_sec']}s (AI: {img_summary['avg_gen_sec']}s, Save: {img_summary['avg_save_sec']}s, Blob: {img_summary['avg_blob_sec']}s)")
+    print(f"  Status Log File:       {log_filepath}")
+    if img_summary['total'] > 0:
+        print(f"  Image Log File:        {img_log_path}")
+    print(f"  Latest Log Copy:       {latest_log_path}")
     print(f"==================================================")
     return job_id

@@ -51,7 +51,7 @@ def preprocess_url(url: str) -> str:
     """
     if not url:
         return ""
-    url = url.strip()
+    url = url.strip().replace("®=", "&reg=").replace("®", "&reg")
     parts = urlsplit(url)
 
     # Canonicalize PIB press releases with PRID to the clean printable HTML page
@@ -60,7 +60,9 @@ def preprocess_url(url: str) -> str:
         prid = None
         for k, v in query_items:
             if k.lower() == "prid" and v.strip():
-                prid = v.strip()
+                # Extract clean numeric PRID in case corrupted by query entity
+                m = re.search(r"^\d+", v.strip())
+                prid = m.group(0) if m else v.strip()
                 break
         if prid:
             return f"https://pib.gov.in/PressReleasePage.aspx?PRID={prid}"
